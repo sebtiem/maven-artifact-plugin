@@ -31,6 +31,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.jar.Attributes;
@@ -48,8 +49,19 @@ import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.artifact.DefaultArtifact;
+import org.eclipse.aether.collection.CollectRequest;
+import org.eclipse.aether.collection.CollectResult;
+import org.eclipse.aether.collection.DependencyCollectionException;
+import org.eclipse.aether.graph.Dependency;
+import org.eclipse.aether.graph.DependencyNode;
+import org.eclipse.aether.repository.ArtifactRepository;
+import org.eclipse.aether.repository.LocalArtifactRequest;
+import org.eclipse.aether.repository.LocalArtifactResult;
+import org.eclipse.aether.repository.LocalRepository;
+import org.eclipse.aether.repository.LocalRepositoryManager;
 import org.eclipse.aether.repository.RemoteRepository;
 import org.eclipse.aether.repository.WorkspaceReader;
+import org.eclipse.aether.repository.WorkspaceRepository;
 import org.eclipse.aether.resolution.ArtifactRequest;
 import org.eclipse.aether.resolution.ArtifactResolutionException;
 import org.eclipse.aether.resolution.ArtifactResult;
@@ -100,7 +112,12 @@ class ReferenceBuildinfoUtil {
     }
 
     File downloadOrCreateReferenceBuildinfo(
-            RemoteRepository repo, MavenProject project, File buildinfoFile, boolean mono)
+            RemoteRepository repo,
+            MavenProject project,
+            File buildinfoFile,
+            boolean mono,
+            RepositorySystemSession repoSession,
+            List<RemoteRepository> remoteRepos)
             throws MojoExecutionException {
         File referenceBuildinfo = downloadReferenceBuildinfo(repo, project);
 
@@ -182,7 +199,21 @@ class ReferenceBuildinfoUtil {
                     String prefix = entry.getValue();
                     File referenceFile = referenceArtifacts.get(artifact);
                     if (referenceFile != null) {
+
+                        LocalArtifactRequest localArtifactRequest = new LocalArtifactRequest();
+                        localArtifactRequest.setArtifact(artifact);
+                        localArtifactRequest.setRepositories(Collections.singletonList(repo));
+
+                        CollectRequest collectRequest = new CollectRequest(new Dependency(artifact, null), null);
+                        CollectResult collectResult = repoSystem.collectDependencies(repoSession, collectRequest);
+                        for (DependencyNode child : collectResult.getRoot().getChildren()) {
+                            printRepositoryInformation(repoSession, child, remoteRepos);
+                        }
+
+                        // TODO: repo ref, timestamp from last build(?), availability check etc.
                         bi.printFile(prefix, artifact.getGroupId(), referenceFile);
+                    } else {
+                        log.error("XXX refFile not NULL");
                     }
                 }
 
@@ -191,12 +222,53 @@ class ReferenceBuildinfoUtil {
                 }
 
                 log.info("Minimal buildinfo generated from downloaded artifacts: " + referenceBuildinfo);
+            } catch (ArtifactResolutionException e) {
+                throw new RuntimeException(e);
+            } catch (DependencyCollectionException e) {
+                throw new RuntimeException(e);
             }
         } catch (IOException e) {
             throw new MojoExecutionException("Error creating file " + referenceBuildinfo, e);
         }
 
         return referenceBuildinfo;
+    }
+
+    private void printRepositoryInformation(
+            RepositorySystemSession repoSession, DependencyNode child, List<RemoteRepository> remoteRepos)
+            throws ArtifactResolutionException {
+        // check for every dependecy in the dependency tree
+        if (!child.getChildren().isEmpty()) {
+            for (DependencyNode node : child.getChildren()) {
+                printRepositoryInformation(repoSession, node, remoteRepos);
+            }
+        } else {
+            Artifact defaultArtifact = child.getDependency().getArtifact();
+            ArtifactRequest artifactRequest = new ArtifactRequest();
+            artifactRequest.setArtifact(defaultArtifact);
+            ArtifactResult artifactResult = repoSystem.resolveArtifact(repoSession, artifactRequest);
+            ArtifactRepository resultRepo = artifactResult.getRepository();
+            log.error("validating artifact " + defaultArtifact.getArtifactId());
+            if (resultRepo instanceof RemoteRepository) {
+                log.error("REMOTE REPO");
+            } else if (resultRepo instanceof LocalRepository) {
+                log.error("LOCAL REPO");
+                LocalArtifactResult localArtifactResult = artifactResult.getLocalArtifactResult();
+                log.error("available: " + localArtifactResult.isAvailable());
+            } else if (resultRepo instanceof WorkspaceRepository) {
+                log.error("WORKSPACE REPO");
+            } else {
+                log.error("WTF REPO " + resultRepo.getClass().getName());
+            }
+
+            for (RemoteRepository remoteRepo : remoteRepos) {
+                LocalRepositoryManager localRepositoryManager = repoSession.getLocalRepositoryManager();
+                LocalArtifactRequest request = new LocalArtifactRequest();
+                request.setArtifact(defaultArtifact);
+                LocalArtifactResult result = localRepositoryManager.find(repoSession, request);
+                log.error(String.format("in repo%s available: %s", remoteRepo, result.isAvailable()));
+            }
+        }
     }
 
     private ReproducibleEnv extractEnv(File file, Artifact artifact) {
