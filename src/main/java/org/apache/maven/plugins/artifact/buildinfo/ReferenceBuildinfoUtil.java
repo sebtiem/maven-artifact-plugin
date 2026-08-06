@@ -31,6 +31,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.jar.Attributes;
@@ -48,6 +49,13 @@ import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.artifact.DefaultArtifact;
+import org.eclipse.aether.collection.CollectRequest;
+import org.eclipse.aether.collection.CollectResult;
+import org.eclipse.aether.collection.DependencyCollectionException;
+import org.eclipse.aether.graph.Dependency;
+import org.eclipse.aether.graph.DependencyNode;
+import org.eclipse.aether.repository.ArtifactRepository;
+import org.eclipse.aether.repository.LocalRepository;
 import org.eclipse.aether.repository.RemoteRepository;
 import org.eclipse.aether.repository.WorkspaceReader;
 import org.eclipse.aether.resolution.ArtifactRequest;
@@ -100,7 +108,12 @@ class ReferenceBuildinfoUtil {
     }
 
     File downloadOrCreateReferenceBuildinfo(
-            RemoteRepository repo, MavenProject project, File buildinfoFile, boolean mono)
+            RemoteRepository repo,
+            MavenProject project,
+            File buildinfoFile,
+            boolean mono,
+            RepositorySystemSession repoSession,
+            List<RemoteRepository> remoteRepos)
             throws MojoExecutionException {
         File referenceBuildinfo = downloadReferenceBuildinfo(repo, project);
 
@@ -179,9 +192,12 @@ class ReferenceBuildinfoUtil {
 
                 for (Map.Entry<Artifact, String> entry : artifacts.entrySet()) {
                     Artifact artifact = entry.getKey();
-                    String prefix = entry.getValue();
+
+                    checkForLocalResolution(repoSession, remoteRepos, artifact);
+
                     File referenceFile = referenceArtifacts.get(artifact);
                     if (referenceFile != null) {
+                        String prefix = entry.getValue();
                         bi.printFile(prefix, artifact.getGroupId(), referenceFile);
                     }
                 }
@@ -191,12 +207,59 @@ class ReferenceBuildinfoUtil {
                 }
 
                 log.info("Minimal buildinfo generated from downloaded artifacts: " + referenceBuildinfo);
+            } catch (ArtifactResolutionException e) {
+                throw new RuntimeException(e);
+            } catch (DependencyCollectionException e) {
+                throw new RuntimeException(e);
             }
         } catch (IOException e) {
             throw new MojoExecutionException("Error creating file " + referenceBuildinfo, e);
         }
 
         return referenceBuildinfo;
+    }
+
+    private void checkForLocalResolution(
+            RepositorySystemSession repoSession, List<RemoteRepository> remoteRepos, Artifact artifact)
+            throws DependencyCollectionException, ArtifactResolutionException {
+        CollectRequest collectRequest = new CollectRequest(new Dependency(artifact, null), null);
+        CollectResult collectResult = repoSystem.collectDependencies(repoSession, collectRequest);
+        for (DependencyNode child : collectResult.getRoot().getChildren()) {
+            checkDependenciesForLocalResolution(repoSession, child, remoteRepos);
+        }
+    }
+
+    private void checkDependenciesForLocalResolution(
+            RepositorySystemSession repoSession, DependencyNode child, List<RemoteRepository> remoteRepos)
+            throws ArtifactResolutionException {
+        // check for every dependency in the dependency tree
+        if (!child.getChildren().isEmpty()) {
+            for (DependencyNode node : child.getChildren()) {
+                checkDependenciesForLocalResolution(repoSession, node, remoteRepos);
+            }
+        } else {
+            printWarningForLocalRepositoryArtifactResolution(repoSession, child, remoteRepos);
+        }
+    }
+
+    private void printWarningForLocalRepositoryArtifactResolution(
+            RepositorySystemSession repoSession, DependencyNode child, List<RemoteRepository> remoteRepos)
+            throws ArtifactResolutionException {
+        Artifact defaultArtifact = child.getDependency().getArtifact();
+        ArtifactRequest artifactRequest = new ArtifactRequest();
+        artifactRequest.setArtifact(defaultArtifact);
+        artifactRequest.setRepositories(remoteRepos);
+        ArtifactResult artifactResult = repoSystem.resolveArtifact(repoSession, artifactRequest);
+        ArtifactRepository resultRepo = artifactResult.getRepository();
+
+        // See #146. An artifact stemming from a local repo is most likely an issue during release builds.
+        if (resultRepo instanceof LocalRepository) {
+            log.warn(String.format(
+                    "The artifact %s:%s:%s is stemming from your local Maven repository. "
+                            + "Please ensure that this is intended. "
+                            + "If not, consider removing this artifact and rebuilding.",
+                    defaultArtifact.getGroupId(), defaultArtifact.getArtifactId(), defaultArtifact.getVersion()));
+        }
     }
 
     private ReproducibleEnv extractEnv(File file, Artifact artifact) {

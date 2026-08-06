@@ -157,7 +157,7 @@ public class CompareMojo extends AbstractBuildinfoMojo {
         ReferenceBuildinfoUtil rmb =
                 new ReferenceBuildinfoUtil(getLog(), referenceDir, artifacts, repoSystem, repoSession, rtInformation);
 
-        return rmb.downloadOrCreateReferenceBuildinfo(repo, project, buildinfoFile, mono);
+        return rmb.downloadOrCreateReferenceBuildinfo(repo, project, buildinfoFile, mono, repoSession, remoteRepos);
     }
 
     private void compareWithReference(Map<Artifact, String> artifacts, File referenceBuildinfo)
@@ -319,6 +319,7 @@ public class CompareMojo extends AbstractBuildinfoMojo {
             String url = repo.getUrl() + "/"
                     + session.getRepositorySession()
                             .getLocalRepositoryManager()
+                            // .find()
                             .getPathForRemoteArtifact(a, repo, null);
             return "wget " + url + "; ls -l " + relative(actual);
         }
