@@ -55,13 +55,9 @@ import org.eclipse.aether.collection.DependencyCollectionException;
 import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.graph.DependencyNode;
 import org.eclipse.aether.repository.ArtifactRepository;
-import org.eclipse.aether.repository.LocalArtifactRequest;
-import org.eclipse.aether.repository.LocalArtifactResult;
 import org.eclipse.aether.repository.LocalRepository;
-import org.eclipse.aether.repository.LocalRepositoryManager;
 import org.eclipse.aether.repository.RemoteRepository;
 import org.eclipse.aether.repository.WorkspaceReader;
-import org.eclipse.aether.repository.WorkspaceRepository;
 import org.eclipse.aether.resolution.ArtifactRequest;
 import org.eclipse.aether.resolution.ArtifactResolutionException;
 import org.eclipse.aether.resolution.ArtifactResult;
@@ -196,24 +192,13 @@ class ReferenceBuildinfoUtil {
 
                 for (Map.Entry<Artifact, String> entry : artifacts.entrySet()) {
                     Artifact artifact = entry.getKey();
-                    String prefix = entry.getValue();
+
+                    checkForLocalResolution(repoSession, remoteRepos, artifact);
+
                     File referenceFile = referenceArtifacts.get(artifact);
                     if (referenceFile != null) {
-
-                        LocalArtifactRequest localArtifactRequest = new LocalArtifactRequest();
-                        localArtifactRequest.setArtifact(artifact);
-                        localArtifactRequest.setRepositories(Collections.singletonList(repo));
-
-                        CollectRequest collectRequest = new CollectRequest(new Dependency(artifact, null), null);
-                        CollectResult collectResult = repoSystem.collectDependencies(repoSession, collectRequest);
-                        for (DependencyNode child : collectResult.getRoot().getChildren()) {
-                            printRepositoryInformation(repoSession, child, remoteRepos);
-                        }
-
-                        // TODO: repo ref, timestamp from last build(?), availability check etc.
+                        String prefix = entry.getValue();
                         bi.printFile(prefix, artifact.getGroupId(), referenceFile);
-                    } else {
-                        log.error("XXX refFile not NULL");
                     }
                 }
 
@@ -234,40 +219,46 @@ class ReferenceBuildinfoUtil {
         return referenceBuildinfo;
     }
 
-    private void printRepositoryInformation(
+    private void checkForLocalResolution(
+            RepositorySystemSession repoSession, List<RemoteRepository> remoteRepos, Artifact artifact)
+            throws DependencyCollectionException, ArtifactResolutionException {
+        CollectRequest collectRequest = new CollectRequest(new Dependency(artifact, null), null);
+        CollectResult collectResult = repoSystem.collectDependencies(repoSession, collectRequest);
+        for (DependencyNode child : collectResult.getRoot().getChildren()) {
+            checkDependenciesForLocalResolution(repoSession, child, remoteRepos);
+        }
+    }
+
+    private void checkDependenciesForLocalResolution(
             RepositorySystemSession repoSession, DependencyNode child, List<RemoteRepository> remoteRepos)
             throws ArtifactResolutionException {
-        // check for every dependecy in the dependency tree
+        // check for every dependency in the dependency tree
         if (!child.getChildren().isEmpty()) {
             for (DependencyNode node : child.getChildren()) {
-                printRepositoryInformation(repoSession, node, remoteRepos);
+                checkDependenciesForLocalResolution(repoSession, node, remoteRepos);
             }
         } else {
-            Artifact defaultArtifact = child.getDependency().getArtifact();
-            ArtifactRequest artifactRequest = new ArtifactRequest();
-            artifactRequest.setArtifact(defaultArtifact);
-            ArtifactResult artifactResult = repoSystem.resolveArtifact(repoSession, artifactRequest);
-            ArtifactRepository resultRepo = artifactResult.getRepository();
-            log.error("validating artifact " + defaultArtifact.getArtifactId());
-            if (resultRepo instanceof RemoteRepository) {
-                log.error("REMOTE REPO");
-            } else if (resultRepo instanceof LocalRepository) {
-                log.error("LOCAL REPO");
-                LocalArtifactResult localArtifactResult = artifactResult.getLocalArtifactResult();
-                log.error("available: " + localArtifactResult.isAvailable());
-            } else if (resultRepo instanceof WorkspaceRepository) {
-                log.error("WORKSPACE REPO");
-            } else {
-                log.error("WTF REPO " + resultRepo.getClass().getName());
-            }
+            printWarningForLocalRepositoryArtifactResolution(repoSession, child, remoteRepos);
+        }
+    }
 
-            for (RemoteRepository remoteRepo : remoteRepos) {
-                LocalRepositoryManager localRepositoryManager = repoSession.getLocalRepositoryManager();
-                LocalArtifactRequest request = new LocalArtifactRequest();
-                request.setArtifact(defaultArtifact);
-                LocalArtifactResult result = localRepositoryManager.find(repoSession, request);
-                log.error(String.format("in repo%s available: %s", remoteRepo, result.isAvailable()));
-            }
+    private void printWarningForLocalRepositoryArtifactResolution(
+            RepositorySystemSession repoSession, DependencyNode child, List<RemoteRepository> remoteRepos)
+            throws ArtifactResolutionException {
+        Artifact defaultArtifact = child.getDependency().getArtifact();
+        ArtifactRequest artifactRequest = new ArtifactRequest();
+        artifactRequest.setArtifact(defaultArtifact);
+        artifactRequest.setRepositories(remoteRepos);
+        ArtifactResult artifactResult = repoSystem.resolveArtifact(repoSession, artifactRequest);
+        ArtifactRepository resultRepo = artifactResult.getRepository();
+
+        // See #146. An artifact stemming from a local repo is most likely an issue during release builds.
+        if (resultRepo instanceof LocalRepository) {
+            log.warn(String.format(
+                    "The artifact %s:%s:%s is stemming from your local Maven repository. "
+                            + "Please ensure that this is intended. "
+                            + "If not, consider removing this artifact and rebuilding.",
+                    defaultArtifact.getGroupId(), defaultArtifact.getArtifactId(), defaultArtifact.getVersion()));
         }
     }
 
